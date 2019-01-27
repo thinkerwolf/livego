@@ -4,17 +4,23 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/gwuhaolin/livego/av"
-	"github.com/gwuhaolin/livego/configure"
-	"github.com/gwuhaolin/livego/container/flv"
-	"github.com/gwuhaolin/livego/protocol/rtmp/core"
-	"github.com/gwuhaolin/livego/utils/uid"
 	"log"
 	"net"
 	"net/url"
+	"os"
+	"os/exec"
+	"path"
 	"reflect"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/thinkerwolf/livego/av"
+	"github.com/thinkerwolf/livego/configure"
+	"github.com/thinkerwolf/livego/container/flv"
+	"github.com/thinkerwolf/livego/protocol/rtmp/core"
+	"github.com/thinkerwolf/livego/utils"
+	"github.com/thinkerwolf/livego/utils/uid"
 )
 
 const (
@@ -65,14 +71,18 @@ func (c *Client) GetHandle() av.Handler {
 }
 
 type Server struct {
-	handler av.Handler
-	getter  av.GetWriter
+	handler          av.Handler
+	getter           av.GetWriter
+	addConnServer    chan *core.ConnServer
+	removeConnServer chan *core.ConnServer
 }
 
 func NewRtmpServer(h av.Handler, getter av.GetWriter) *Server {
 	return &Server{
-		handler: h,
-		getter:  getter,
+		handler:          h,
+		getter:           getter,
+		addConnServer:    make(chan *core.ConnServer),
+		removeConnServer: make(chan *core.ConnServer),
 	}
 }
 
@@ -80,6 +90,60 @@ func (s *Server) Serve(listener net.Listener) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Println("rtmp serve panic: ", r)
+		}
+	}()
+
+	ffmpegCfg := configure.RtmpServercfg.Ffmpeg
+	ffmpegEnable := len(ffmpegCfg.Dir_path) > 0
+	go func() {
+		connServerMap := make(map[*core.ConnServer]*exec.Cmd)
+		var connServer *core.ConnServer
+		addConnOk := true
+		removeConnOk := true
+		for addConnOk || removeConnOk {
+			select {
+			case connServer, addConnOk = <-s.addConnServer:
+				if ffmpegEnable {
+					if addConnOk && connServer.IsPublisher() {
+						_, name, url := connServer.GetInfo()
+						dir := path.Join(ffmpegCfg.Dir_path, name)
+						err := utils.EnsureDir(dir)
+						if err != nil {
+							log.Printf("EnsureDir:[%s] err:%v.\n", dir, err)
+							return
+						}
+						flvDir := path.Join(dir, fmt.Sprintf("out.flv"))
+						cmd := exec.Command(ffmpegCfg.Path, "-i", url, "-c", "copy", flvDir)
+						f, err := os.OpenFile(path.Join(dir, fmt.Sprintf("log.txt")), os.O_RDWR|os.O_CREATE, 0755)
+						if err == nil {
+							cmd.Stdout = f
+							cmd.Stderr = f
+						}
+						connServerMap[connServer] = cmd
+						err = cmd.Start()
+						if err != nil {
+							log.Printf("Start ffmpeg err:%v", err)
+						}
+						log.Printf("add ffmpeg [%v] to pull stream from pusher[%s]", cmd, url)
+					}
+				}
+			case connServer, removeConnOk = <-s.removeConnServer:
+				if ffmpegEnable {
+					if removeConnOk && connServer.IsPublisher() {
+						log.Printf("ConnServer removed:%v", connServer)
+						cmd := connServerMap[connServer]
+						proc := cmd.Process
+						if proc != nil {
+							log.Printf("prepare to SIGTERM to process:%v", proc)
+							proc.Signal(syscall.SIGTERM)
+							proc.Wait()
+							log.Printf("process:%v terminate.", proc)
+						}
+						delete(connServerMap, connServer)
+						log.Printf("cmd removed:%v", cmd)
+					}
+				}
+			}
 		}
 	}()
 
@@ -92,6 +156,7 @@ func (s *Server) Serve(listener net.Listener) (err error) {
 		conn := core.NewConn(netconn, 4*1024)
 		log.Println("new client, connect remote:", conn.RemoteAddr().String(),
 			"local:", conn.LocalAddr().String())
+
 		go s.handleConn(conn)
 	}
 }
@@ -118,12 +183,13 @@ func (s *Server) handleConn(conn *core.Conn) error {
 		log.Println("CheckAppName err:", err)
 		return err
 	}
-
+	s.addConnServer <- connServer
 	log.Printf("handleConn: IsPublisher=%v", connServer.IsPublisher())
 	if connServer.IsPublisher() {
 		if pushlist, ret := configure.GetStaticPushUrlList(appname); ret && (pushlist != nil) {
 			log.Printf("GetStaticPushUrlList: %v", pushlist)
 		}
+
 		reader := NewVirReader(connServer)
 		s.handler.HandleReader(reader)
 		log.Printf("new publisher: %+v", reader.Info())
@@ -284,7 +350,7 @@ func (v *VirWriter) Write(p *av.Packet) (err error) {
 }
 
 func (v *VirWriter) SendPacket() error {
-	Flush := reflect.ValueOf(v.conn).MethodByName("Flush");
+	Flush := reflect.ValueOf(v.conn).MethodByName("Flush")
 	var cs core.ChunkStream
 	for {
 		p, ok := <-v.packetQueue
@@ -313,7 +379,7 @@ func (v *VirWriter) SendPacket() error {
 				v.closed = true
 				return err
 			}
-			Flush.Call(nil);
+			Flush.Call(nil)
 		} else {
 			return errors.New("closed")
 		}

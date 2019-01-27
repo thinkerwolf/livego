@@ -25,28 +25,35 @@ type Application struct {
 	Static_push []string
 }
 
+type FfmpegCfg struct {
+	Path            string
+	Duration_second int
+	Dir_path        string
+}
+
 type ServerCfg struct {
 	Server []Application
+	Ffmpeg FfmpegCfg
 }
 
 var RtmpServercfg ServerCfg
 
 func LoadConfig(configfilename string) error {
-	log.Printf("starting load configure file(%s)......", configfilename)
+	log.Printf("starting load configure file(%s)......\n", configfilename)
 	data, err := ioutil.ReadFile(configfilename)
 	if err != nil {
 		log.Printf("ReadFile %s error:%v", configfilename, err)
 		return err
 	}
 
-	log.Printf("loadconfig: \r\n%s", string(data))
+	log.Printf("loadconfig: \r\n%s\n", string(data))
 
 	err = json.Unmarshal(data, &RtmpServercfg)
 	if err != nil {
 		log.Printf("json.Unmarshal error:%v", err)
 		return err
 	}
-	log.Printf("get config json data:%v", RtmpServercfg)
+	log.Printf("get config json data:%v\n", RtmpServercfg)
 	return nil
 }
 

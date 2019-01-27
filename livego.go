@@ -2,14 +2,15 @@ package main
 
 import (
 	"flag"
-	"github.com/gwuhaolin/livego/configure"
-	"github.com/gwuhaolin/livego/protocol/hls"
-	"github.com/gwuhaolin/livego/protocol/httpflv"
-	"github.com/gwuhaolin/livego/protocol/httpopera"
-	"github.com/gwuhaolin/livego/protocol/rtmp"
 	"log"
 	"net"
 	"time"
+
+	"github.com/thinkerwolf/livego/configure"
+	"github.com/thinkerwolf/livego/protocol/hls"
+	"github.com/thinkerwolf/livego/protocol/httpflv"
+	"github.com/thinkerwolf/livego/protocol/httpopera"
+	"github.com/thinkerwolf/livego/protocol/rtmp"
 )
 
 var (
@@ -67,6 +68,7 @@ func startRtmp(stream *rtmp.RtmpStream, hlsServer *hls.Server) {
 		}
 	}()
 	log.Println("RTMP Listen On", *rtmpAddr)
+	stream.Ser = rtmpServer
 	rtmpServer.Serve(rtmpListen)
 }
 
@@ -107,6 +109,21 @@ func startHTTPOpera(stream *rtmp.RtmpStream) {
 	}
 }
 
+func startHttp(stream *rtmp.RtmpStream) {
+	if *operaAddr != "" {
+		opServer := httpopera.NewServer(stream, *rtmpAddr)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Println("HTTP-Operation server panic: ", r)
+				}
+			}()
+			log.Println("HTTP-Operation listen On", *operaAddr)
+			opServer.Start(*operaAddr)
+		}()
+	}
+}
+
 func main() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -123,8 +140,8 @@ func main() {
 	stream := rtmp.NewRtmpStream()
 	hlsServer := startHls()
 	startHTTPFlv(stream)
-	startHTTPOpera(stream)
-
+	// startHTTPOpera(stream)
+	startHttp(stream)
 	startRtmp(stream, hlsServer)
-	//startRtmp(stream, nil)
+	// startRtmp(stream, nil)
 }

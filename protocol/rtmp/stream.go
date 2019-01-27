@@ -2,13 +2,15 @@ package rtmp
 
 import (
 	"errors"
-	"github.com/gwuhaolin/livego/av"
-	"github.com/gwuhaolin/livego/protocol/rtmp/cache"
-	"github.com/gwuhaolin/livego/protocol/rtmp/rtmprelay"
-	"github.com/orcaman/concurrent-map"
 	"log"
 	"strings"
 	"time"
+
+	cmap "github.com/orcaman/concurrent-map"
+	"github.com/thinkerwolf/livego/av"
+	"github.com/thinkerwolf/livego/protocol/rtmp/cache"
+	"github.com/thinkerwolf/livego/protocol/rtmp/core"
+	"github.com/thinkerwolf/livego/protocol/rtmp/rtmprelay"
 )
 
 var (
@@ -17,6 +19,7 @@ var (
 
 type RtmpStream struct {
 	streams cmap.ConcurrentMap //key
+	Ser     *Server
 }
 
 func NewRtmpStream() *RtmpStream {
@@ -47,7 +50,7 @@ func (rs *RtmpStream) HandleReader(r av.ReadCloser) {
 		rs.streams.Set(info.Key, stream)
 		stream.info = info
 	}
-
+	stream.rs = rs
 	stream.AddReader(r)
 }
 
@@ -61,6 +64,7 @@ func (rs *RtmpStream) HandleWriter(w av.WriteCloser) {
 		s = NewStream()
 		rs.streams.Set(info.Key, s)
 		s.info = info
+		s.rs = rs
 	} else {
 		item, ok := rs.streams.Get(info.Key)
 		if ok {
@@ -92,6 +96,7 @@ type Stream struct {
 	r       av.ReadCloser
 	ws      cmap.ConcurrentMap
 	info    av.Info
+	rs      *RtmpStream
 }
 
 type PackWriterCloser struct {
@@ -389,6 +394,13 @@ func (s *Stream) closeInter() {
 	if s.r != nil {
 		s.StopStaticPush()
 		log.Printf("[%v] publisher closed", s.r.Info())
+	}
+
+	switch s.r.(type) {
+	case *VirReader:
+		vr := s.r.(*VirReader)
+		cs := vr.conn.(*core.ConnServer)
+		s.rs.Ser.removeConnServer <- cs
 	}
 
 	for item := range s.ws.IterBuffered() {

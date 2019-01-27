@@ -3,14 +3,34 @@ package httpopera
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/gwuhaolin/livego/protocol/rtmp/rtmprelay"
 	"io"
+	"log"
+	"mime"
 	"net"
 	"net/http"
-	"log"
-	"github.com/gwuhaolin/livego/av"
-	"github.com/gwuhaolin/livego/protocol/rtmp"
+
+	"github.com/gin-gonic/gin"
+	"github.com/thinkerwolf/livego/av"
+	"github.com/thinkerwolf/livego/protocol/rtmp"
+	"github.com/thinkerwolf/livego/protocol/rtmp/rtmprelay"
+	"github.com/thinkerwolf/livego/utils"
 )
+
+var Router *gin.Engine
+
+func init() {
+	mime.AddExtensionType(".svg", "image/svg+xml")
+	mime.AddExtensionType(".m3u8", "application/vnd.apple.mpegurl")
+	// mime.AddExtensionType(".m3u8", "application/x-mpegurl")
+	mime.AddExtensionType(".ts", "video/mp2t")
+	// prevent on Windows with Dreamware installed, modified registry .css -> application/x-css
+	// see https://stackoverflow.com/questions/22839278/python-built-in-server-not-loading-css
+	mime.AddExtensionType(".css", "text/css; charset=utf-8")
+
+	gin.DisableConsoleColor()
+	gin.SetMode(gin.ReleaseMode)
+	gin.DefaultWriter = utils.GetLogWriter()
+}
 
 type Response struct {
 	w       http.ResponseWriter
@@ -73,6 +93,25 @@ func (s *Server) Serve(l net.Listener) error {
 	})
 	http.Serve(l, mux)
 	return nil
+}
+
+func (s *Server) Start(addr string) error {
+	Router = gin.New()
+	Router.Use(gin.Recovery())
+
+	// 验证是否登录了
+	api := Router.Group("/api").Use()
+	api.GET("/control/push", func(c *gin.Context) {
+		s.controlPush(c)
+	})
+	api.GET("/control/pull", func(c *gin.Context) {
+		s.controlPull(c)
+	})
+	api.GET("/stat/livestat", func(c *gin.Context) {
+		s.LiveStatics(c)
+	})
+
+	return Router.Run(addr)
 }
 
 type stream struct {
@@ -234,6 +273,148 @@ func (s *Server) handlePush(w http.ResponseWriter, req *http.Request) {
 		}
 
 		io.WriteString(w, retString)
+		log.Printf("push start return %s", retString)
+	}
+}
+
+//http://127.0.0.1:8090/stat/livestat
+func (server *Server) LiveStatics(ctx *gin.Context) {
+	rtmpStream := server.handler.(*rtmp.RtmpStream)
+	if rtmpStream == nil {
+		ctx.String(http.StatusForbidden, "<h1>Get rtmp stream information error</h1>")
+		return
+	}
+
+	msgs := new(streams)
+	for item := range rtmpStream.GetStreams().IterBuffered() {
+		if s, ok := item.Val.(*rtmp.Stream); ok {
+			if s.GetReader() != nil {
+				switch s.GetReader().(type) {
+				case *rtmp.VirReader:
+					v := s.GetReader().(*rtmp.VirReader)
+					msg := stream{item.Key, v.Info().URL, v.ReadBWInfo.StreamId, v.ReadBWInfo.VideoDatainBytes, v.ReadBWInfo.VideoSpeedInBytesperMS,
+						v.ReadBWInfo.AudioDatainBytes, v.ReadBWInfo.AudioSpeedInBytesperMS}
+					msgs.Publishers = append(msgs.Publishers, msg)
+				}
+			}
+		}
+	}
+
+	for item := range rtmpStream.GetStreams().IterBuffered() {
+		ws := item.Val.(*rtmp.Stream).GetWs()
+		for s := range ws.IterBuffered() {
+			if pw, ok := s.Val.(*rtmp.PackWriterCloser); ok {
+				if pw.GetWriter() != nil {
+					switch pw.GetWriter().(type) {
+					case *rtmp.VirWriter:
+						v := pw.GetWriter().(*rtmp.VirWriter)
+						msg := stream{item.Key, v.Info().URL, v.WriteBWInfo.StreamId, v.WriteBWInfo.VideoDatainBytes, v.WriteBWInfo.VideoSpeedInBytesperMS,
+							v.WriteBWInfo.AudioDatainBytes, v.WriteBWInfo.AudioSpeedInBytesperMS}
+						msgs.Players = append(msgs.Players, msg)
+					}
+				}
+			}
+		}
+	}
+	ctx.JSON(http.StatusOK, msgs)
+}
+
+//http://127.0.0.1:8090/control/pull?&oper=start&app=live&name=123456&url=rtmp://192.168.16.136/live/123456
+func (s *Server) controlPull(ctx *gin.Context) {
+	var retString string
+	var err error
+
+	oper := ctx.Param("oper")
+	app := ctx.Param("app")
+	name := ctx.Param("name")
+	url := ctx.Param("url")
+
+	log.Printf("control pull: oper=%v, app=%v, name=%v, url=%v", oper, app, name, url)
+	if (len(app) <= 0) || (len(name) <= 0) || (len(url) <= 0) {
+		ctx.String(http.StatusOK, "control push parameter error, please check them.</br>")
+		return
+	}
+
+	remoteurl := "rtmp://127.0.0.1" + s.rtmpAddr + "/" + app + "/" + name
+	localurl := url
+
+	keyString := "pull:" + app + "/" + name
+	if oper == "stop" {
+		pullRtmprelay, found := s.session[keyString]
+
+		if !found {
+			retString = fmt.Sprintf("session key[%s] not exist, please check it again.", keyString)
+			ctx.String(http.StatusOK, retString)
+			return
+		}
+		log.Printf("rtmprelay stop push %s from %s", remoteurl, localurl)
+		pullRtmprelay.Stop()
+
+		delete(s.session, keyString)
+		retString = fmt.Sprintf("<h1>push url stop %s ok</h1></br>", url[0])
+		ctx.String(http.StatusOK, retString)
+		log.Printf("pull stop return %s", retString)
+	} else {
+		pullRtmprelay := rtmprelay.NewRtmpRelay(&localurl, &remoteurl)
+		log.Printf("rtmprelay start push %s from %s", remoteurl, localurl)
+		err = pullRtmprelay.Start()
+		if err != nil {
+			retString = fmt.Sprintf("push error=%v", err)
+		} else {
+			s.session[keyString] = pullRtmprelay
+			retString = fmt.Sprintf("<h1>push url start %s ok</h1></br>", url[0])
+		}
+		ctx.String(http.StatusOK, retString)
+		log.Printf("pull start return %s", retString)
+	}
+}
+
+//http://127.0.0.1:8090/control/push?&oper=start&app=live&name=123456&url=rtmp://192.168.16.136/live/123456
+func (s *Server) controlPush(ctx *gin.Context) {
+	var retString string
+	var err error
+
+	oper := ctx.Param("oper")
+	app := ctx.Param("app")
+	name := ctx.Param("name")
+	url := ctx.Param("url")
+
+	log.Printf("control push: oper=%v, app=%v, name=%v, url=%v", oper, app, name, url)
+	if (len(app) <= 0) || (len(name) <= 0) || (len(url) <= 0) {
+		ctx.String(http.StatusOK, "control push parameter error, please check them.</br>")
+		return
+	}
+
+	localurl := "rtmp://127.0.0.1" + s.rtmpAddr + "/" + app + "/" + name
+	remoteurl := url
+
+	keyString := "push:" + app + "/" + name
+	if oper == "stop" {
+		pushRtmprelay, found := s.session[keyString]
+		if !found {
+			retString = fmt.Sprintf("<h1>session key[%s] not exist, please check it again.</h1>", keyString)
+			ctx.String(http.StatusOK, retString)
+			return
+		}
+		log.Printf("rtmprelay stop push %s from %s", remoteurl, localurl)
+		pushRtmprelay.Stop()
+
+		delete(s.session, keyString)
+		retString = fmt.Sprintf("<h1>push url stop %s ok</h1></br>", url[0])
+		ctx.String(http.StatusOK, retString)
+		log.Printf("push stop return %s", retString)
+	} else {
+		pushRtmprelay := rtmprelay.NewRtmpRelay(&localurl, &remoteurl)
+		log.Printf("rtmprelay start push %s from %s", remoteurl, localurl)
+		err = pushRtmprelay.Start()
+		if err != nil {
+			retString = fmt.Sprintf("push error=%v", err)
+		} else {
+			retString = fmt.Sprintf("<h1>push url start %s ok</h1></br>", url[0])
+			s.session[keyString] = pushRtmprelay
+		}
+
+		ctx.String(http.StatusOK, retString)
 		log.Printf("push start return %s", retString)
 	}
 }
