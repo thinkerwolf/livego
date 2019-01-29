@@ -106,12 +106,13 @@ func (s *Server) Serve(listener net.Listener) (err error) {
 				if ffmpegEnable {
 					if addConnOk && connServer.IsPublisher() {
 						_, name, url := connServer.GetInfo()
-						dir := path.Join(ffmpegCfg.Dir_path, name)
+						dir := path.Join(ffmpegCfg.Dir_path, name, time.Now().Format("20060102150405"))
 						err := utils.EnsureDir(dir)
 						if err != nil {
 							log.Printf("EnsureDir:[%s] err:%v.\n", dir, err)
 							return
 						}
+
 						flvDir := path.Join(dir, fmt.Sprintf("out.flv"))
 						cmd := exec.Command(ffmpegCfg.Path, "-i", url, "-c", "copy", flvDir)
 						f, err := os.OpenFile(path.Join(dir, fmt.Sprintf("log.txt")), os.O_RDWR|os.O_CREATE, 0755)
@@ -167,6 +168,7 @@ func (s *Server) handleConn(conn *core.Conn) error {
 		log.Println("handleConn HandshakeServer err:", err)
 		return err
 	}
+
 	connServer := core.NewConnServer(conn)
 
 	if err := connServer.ReadMsg(); err != nil {
@@ -177,6 +179,7 @@ func (s *Server) handleConn(conn *core.Conn) error {
 
 	appname, _, _ := connServer.GetInfo()
 
+	//log.Printf("ConnServer -> appname=%s", appname)
 	if ret := configure.CheckAppName(appname); !ret {
 		err := errors.New("application name=%s is not configured")
 		conn.Close()

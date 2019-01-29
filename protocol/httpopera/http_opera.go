@@ -9,6 +9,9 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/gin-contrib/static"
+	"github.com/thinkerwolf/livego/configure"
+
 	"github.com/gin-gonic/gin"
 	"github.com/thinkerwolf/livego/av"
 	"github.com/thinkerwolf/livego/protocol/rtmp"
@@ -100,6 +103,7 @@ func (s *Server) Start(addr string) error {
 	Router.Use(gin.Recovery())
 
 	// 验证是否登录了
+
 	api := Router.Group("/api").Use()
 	api.GET("/control/push", func(c *gin.Context) {
 		s.controlPush(c)
@@ -111,6 +115,13 @@ func (s *Server) Start(addr string) error {
 		s.LiveStatics(c)
 	})
 
+	api.GET("/record/folders", RecordFolders)
+	api.GET("/record/files", RecordFiles)
+
+	mp4Path := configure.RtmpServercfg.Ffmpeg.Dir_path
+	if len(mp4Path) != 0 {
+		Router.Use(static.Serve("/record", static.LocalFile(mp4Path, true)))
+	}
 	return Router.Run(addr)
 }
 
